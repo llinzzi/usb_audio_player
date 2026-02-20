@@ -1,0 +1,36 @@
+# ESP-IDF build files
+build/
+sdkconfig
+sdkconfig.old
+*.pyc
+__pycache__/
+
+# IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# Dependencies
+dependencies.lock
+
+# Managed components (optional - uncomment if you want to ignore managed components)
+# managed_components/
+
+# Logs
+*.log
+
+# Temporary files
+*.tmp
+*.bak
+*.cache
