@@ -5,12 +5,14 @@
  */
 
 #include <inttypes.h>
+#include <stdio.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/event_groups.h"
 #include "freertos/task.h"
 #include "freertos/queue.h"
 #include "esp_err.h"
 #include "esp_log.h"
+#include "driver/uart.h"
 #include "esp_spiffs.h"
 #include "usb/usb_host.h"
 #include "usb/uac_host.h"
@@ -18,13 +20,25 @@
 
 static const char *TAG = "usb_audio_player";
 
+// UART1 vprintf function for ESP_LOG output
+static int uart1_vprintf(const char *fmt, va_list args)
+{
+    char *str;
+    int len = vasprintf(&str, fmt, args);
+    if (len > 0) {
+        uart_write_bytes(UART_NUM_1, str, len);
+        free(str);
+    }
+    return len;
+}
+
 #define USB_HOST_TASK_PRIORITY  5
 #define UAC_TASK_PRIORITY       5
 #define USER_TASK_PRIORITY      2
 #define SPIFFS_BASE             "/spiffs"
 #define MP3_FILE_NAME           "/new_epic.mp3"
 #define BIT1_SPK_START          (0x01 << 0)
-#define DEFAULT_VOLUME          45
+#define DEFAULT_VOLUME          5
 #define DEFAULT_UAC_FREQ        48000
 #define DEFAULT_UAC_BITS        16
 #define DEFAULT_UAC_CH          2
@@ -317,6 +331,20 @@ static void uac_lib_task(void *arg)
 
 void app_main(void)
 {
+    // Initialize UART1 for console output (GPIO17=TX, GPIO18=RX)
+    uart_config_t uart_config = {
+        .baud_rate = 115200,
+        .data_bits = UART_DATA_8_BITS,
+        .parity = UART_PARITY_DISABLE,
+        .stop_bits = UART_STOP_BITS_1,
+        .flow_ctrl = UART_HW_FLOWCTRL_DISABLE,
+        .source_clk = UART_SCLK_DEFAULT,
+    };
+    uart_driver_install(UART_NUM_1, 1024, 0, 0, NULL, 0);
+    uart_param_config(UART_NUM_1, &uart_config);
+    uart_set_pin(UART_NUM_1, 17, 18, UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE);
+    esp_log_set_vprintf(uart1_vprintf);
+
     s_event_queue = xQueueCreate(10, sizeof(s_event_queue_t));
     assert(s_event_queue != NULL);
 

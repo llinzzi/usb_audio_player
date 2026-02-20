@@ -1,5 +1,5 @@
 /*
- * SPDX-FileCopyrightText: 2024 Espressif Systems (Shanghai) CO LTD
+ * SPDX-FileCopyrightText: 2024-2025 Espressif Systems (Shanghai) CO LTD
  *
  * SPDX-License-Identifier: Apache-2.0
  */
@@ -8,6 +8,7 @@
 
 #include <wchar.h>
 #include <stdint.h>
+#include "freertos/FreeRTOS.h"
 #include "esp_err.h"
 #include "uac.h"
 
@@ -66,7 +67,7 @@ typedef enum {
  * @param[in] arg         User argument from UAC driver configuration structure
 */
 typedef void (*uac_host_driver_event_cb_t)(uint8_t addr, uint8_t iface_num,
-        const uac_host_driver_event_t event, void *arg);
+                                           const uac_host_driver_event_t event, void *arg);
 
 /**
  * @brief USB UAC logic device/interface event callback.
@@ -76,19 +77,24 @@ typedef void (*uac_host_driver_event_cb_t)(uint8_t addr, uint8_t iface_num,
  * @param[in] arg                   User argument
 */
 typedef void (*uac_host_device_event_cb_t)(uac_host_device_handle_t uac_device_handle,
-        const uac_host_device_event_t event, void *arg);
+                                           const uac_host_device_event_t event, void *arg);
+
+/**
+ * @brief Interface parameters for USB UAC host class descriptor print callback
+*/
+typedef struct {
+    uint8_t bClass;         /*!< Interface Class of the UAC device */
+    uint8_t bSubclass;      /*!< Interface Subclass of the UAC device */
+    uint8_t bProtocol;      /*!< Protocol of the UAC device */
+} iface_params_t;
 
 /**
  * @brief  USB UAC host class descriptor print callback
  *
- * @param[in] desc  Pointer to the USB configuration descriptor
- * @param[in] class  Class of the UAC device
- * @param[in] subclass  Subclass of the UAC device
- * @param[in] protocol  Protocol of the UAC device
- *
+ * @param[in] desc            Pointer to the USB configuration descriptor
+ * @param[in] iface_params    Pointer to interface parameters struct
  */
-typedef void (*print_class_descriptor_with_context_cb)(const usb_standard_desc_t *desc,
-        uint8_t class, uint8_t subclass, uint8_t protocol);
+typedef void (*print_class_descriptor_with_context_cb)(const usb_standard_desc_t *desc, iface_params_t *iface_params);
 
 /**
  * @brief Stream type
@@ -231,7 +237,7 @@ esp_err_t uac_host_device_open(const uac_host_device_config_t *config, uac_host_
  * - ESP_ERR_NOT_FOUND if the device is not found
  */
 esp_err_t uac_host_device_open_with_vid_pid(uint16_t vid, uint16_t pid, const uac_host_device_config_t *config,
-        uac_host_device_handle_t *uac_dev_handle);
+                                            uac_host_device_handle_t *uac_dev_handle);
 
 /**
  * @brief Close a UAC logic device/interface
@@ -291,7 +297,7 @@ esp_err_t uac_host_printf_device_param(uac_host_device_handle_t uac_dev_handle);
  *  - ESP_OK on success (keep calling this function)
  *  - ESP_FAIL if the event handling is finished (stop calling this function)
  */
-esp_err_t uac_host_handle_events(uint32_t timeout);
+esp_err_t uac_host_handle_events(TickType_t timeout);
 
 // ------------------------ USB UAC Host driver API ----------------------------
 /**
