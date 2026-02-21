@@ -38,7 +38,7 @@ static int uart1_vprintf(const char *fmt, va_list args)
 #define SPIFFS_BASE             "/spiffs"
 #define MP3_FILE_NAME           "/new_epic.mp3"
 #define BIT1_SPK_START          (0x01 << 0)
-#define DEFAULT_VOLUME          5
+#define DEFAULT_VOLUME          50
 #define DEFAULT_UAC_FREQ        48000
 #define DEFAULT_UAC_BITS        16
 #define DEFAULT_UAC_CH          2
