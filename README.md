@@ -31,14 +31,14 @@
 | USB_DP | GPIO20 |
 | USB_DM | GPIO19 |
 
-### 日志输出 (UART1)
+### 日志输出 (UART0)
 
-本项目使用 UART1 输出日志：
+本项目默认使用 UART0 输出日志（ESP32-S3）：
 
 | 信号 | GPIO 引脚 |
 |------|----------|
-| TX   | GPIO17   |
-| RX   | GPIO18   |
+| TX   | GPIO43   |
+| RX   | GPIO44   |
 | 波特率 | 115200   |
 
 ## 构建和烧录
