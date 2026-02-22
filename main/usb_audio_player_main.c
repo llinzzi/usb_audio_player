@@ -14,8 +14,8 @@
 #include "esp_log.h"
 #include "esp_vfs_fat.h"
 #include "sdmmc_cmd.h"
+#include "driver/sdmmc_host.h"
 #include "driver/gpio.h"
-#include "driver/spi_master.h"
 #include "usb/usb_host.h"
 #include "usb/uac_host.h"
 #include "audio_player.h"
@@ -33,11 +33,13 @@ static const char *TAG = "usb_audio_player";
 #define DEFAULT_UAC_BITS        16
 #define DEFAULT_UAC_CH          2
 
-// SD 卡引脚配置 (微雪 ESP32-S3)
-#define SD_CARD_CS_PIN          10
-#define SD_CARD_MOSI_PIN        11
-#define SD_CARD_MISO_PIN        12
-#define SD_CARD_SCK_PIN         13
+// SD 卡引脚配置 (微雪 ESP32-S3 AMOLED 1.8 寸)
+// SDIO 模式 (4 线)
+#define SD_CARD_D1_PIN          37
+#define SD_CARD_D0_PIN          36
+#define SD_CARD_CLK_PIN         35
+#define SD_CARD_CMD_PIN         34
+#define SD_CARD_CS_PIN          33
 
 static QueueHandle_t s_event_queue = NULL;
 static uac_host_device_handle_t s_spk_dev_handle = NULL;
@@ -330,23 +332,18 @@ void app_main(void)
     s_event_queue = xQueueCreate(10, sizeof(s_event_queue_t));
     assert(s_event_queue != NULL);
 
-    // Initialize SD card (SPI mode)
-    ESP_LOGI(TAG, "Initializing SD card (SPI mode)");
-
-    // Initialize SPI bus
-    spi_bus_config_t bus_cfg = {
-        .mosi_io_num = SD_CARD_MOSI_PIN,
-        .miso_io_num = SD_CARD_MISO_PIN,
-        .sclk_io_num = SD_CARD_SCK_PIN,
-        .quadwp_io_num = -1,
-        .quadhd_io_num = -1,
-        .max_transfer_sz = 4000,
-    };
-    ESP_ERROR_CHECK(spi_bus_initialize(SPI2_HOST, &bus_cfg, SPI_DMA_CH_AUTO));
-
-    sdspi_device_config_t dev_config = SDSPI_DEVICE_CONFIG_DEFAULT();
-    dev_config.gpio_cs = SD_CARD_CS_PIN;
-    dev_config.host_id = SPI2_HOST;
+    // Initialize SD card (SDIO mode)
+    ESP_LOGI(TAG, "Initializing SD card (SDIO mode)");
+    sdmmc_host_t host = SDMMC_HOST_DEFAULT();
+    sdmmc_slot_config_t slot_config = SDMMC_SLOT_CONFIG_DEFAULT();
+    slot_config.clk = SD_CARD_CLK_PIN;
+    slot_config.cmd = SD_CARD_CMD_PIN;
+    slot_config.d0 = SD_CARD_D0_PIN;
+    slot_config.d1 = SD_CARD_D1_PIN;
+    slot_config.d2 = GPIO_NUM_NC;
+    slot_config.d3 = SD_CARD_CS_PIN;
+    slot_config.width = 4;
+    slot_config.flags = 0;
 
     esp_vfs_fat_sdmmc_mount_config_t mount_config = {
         .format_if_mount_failed = false,
@@ -355,9 +352,7 @@ void app_main(void)
     };
 
     sdmmc_card_t *card;
-    sdmmc_host_t host = SDSPI_HOST_DEFAULT();
-    host.slot = SPI2_HOST;
-    esp_err_t ret = esp_vfs_fat_sdspi_mount(MOUNT_POINT, &host, &dev_config, &mount_config, &card);
+    esp_err_t ret = esp_vfs_fat_sdmmc_mount(MOUNT_POINT, &host, &slot_config, &mount_config, &card);
     if (ret != ESP_OK) {
         if (ret == ESP_FAIL) {
             ESP_LOGE(TAG, "Failed to mount filesystem. SD card not found or not initialized.");
