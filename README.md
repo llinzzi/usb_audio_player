@@ -10,6 +10,7 @@
 - 支持 44100/48000/96000 Hz 采样率
 - 支持 16/24 位音频分辨率
 - 支持单声道/立体声输出
+- 支持 SD 卡存储（通过 TCA9554 I/O 扩展芯片控制）
 
 ## 硬件要求
 
@@ -26,10 +27,29 @@
 
 ### 硬件连接
 
+#### USB 音频设备
 | 信号 | ESP32-S2/S3 引脚 |
 |------|-----------------|
 | USB_DP | GPIO20 |
 | USB_DM | GPIO19 |
+
+#### SD 卡 (SDMMC 1 位模式)
+| 信号 | GPIO 引脚 |
+|------|----------|
+| CLK  | GPIO2    |
+| CMD  | GPIO1    |
+| D0   | GPIO3    |
+
+#### TCA9554PWR I/O 扩展芯片
+用于控制 SD 卡电源，通过 I2C 接口连接：
+| 信号 | GPIO 引脚 |
+|------|----------|
+| SCL  | GPIO14   |
+| SDA  | GPIO15   |
+| I2C 地址 | 0x20 (A0=A1=A2=GND) |
+
+TCA9554 引脚分配：
+- IO0, IO1, IO2, IO7: SD 卡电源控制
 
 ### 日志输出 (UART0)
 
@@ -54,7 +74,7 @@
 # 1. 设置 IDF 环境
 . ./export.sh
 
-# 2. 设置目标芯片 (esp32s2, esp32s3, 或 esp32p4)
+# 2. 设置目标芯片 (本项目使用 ESP32-S3)
 idf.py set-target esp32s3
 
 # 3. 如果组件管理器报错，升级版本
@@ -79,9 +99,8 @@ usb_audio_player/
 │   └── usb_audio_player_main.c    # 主程序入口
 ├── managed_components/
 │   ├── chmorgan__esp-audio-player/ # MP3 解码器和播放器抽象层
-│   └── espressif__usb_host_uac/    # USB 音频类主机驱动程序
-├── spiffs/
-│   └── new_epic.mp3               # 默认播放的 MP3 文件
+│   ├── espressif__usb_host_uac/    # USB 音频类主机驱动程序
+│   └── espressif__esp_io_expander_tca9554/ # TCA9554 I/O 扩展芯片驱动
 ├── sdkconfig.defaults             # 项目配置文件
 ├── partitions.csv                 # 分区表
 └── CMakeLists.txt                 # 构建配置
@@ -107,19 +126,19 @@ usb_audio_player/
 |--------|--------|------|
 | `usb_events` | 5 | USB 主机客户端，管理设备枚举 |
 | `uac_events` | 5 | UAC 驱动程序，处理扬声器连接/音频流 |
-| `app_main` | 2 | 主循环，初始化 SPIFFS 和音频播放器 |
+| `app_main` | 2 | 主循环，初始化 TCA9554、SD 卡和音频播放器 |
 
 ### 音频流程
 
 ```
-SPIFFS (MP3 文件) → esp-audio-player (解码) → usb_host_uac → USB 扬声器
+SD 卡 (MP3 文件) → esp-audio-player (解码) → usb_host_uac → USB 扬声器
 ```
 
 ## 自定义 MP3 文件
 
 如需播放自己的 MP3 文件：
 
-1. 将 MP3 文件放入 `spiffs/` 目录
+1. 将 MP3 文件复制到 SD 卡根目录
 2. 修改 `main/usb_audio_player_main.c` 中的 `MP3_FILE_NAME` 宏：
    ```c
    #define MP3_FILE_NAME           "/your_file.mp3"
@@ -129,7 +148,7 @@ SPIFFS (MP3 文件) → esp-audio-player (解码) → usb_host_uac → USB 扬�
 
 ## 默认播放文件
 
-默认 MP3 文件为 `spiffs/new_epic.mp3`，规格为 48 kHz、16 位、立体声。
+默认 MP3 文件为 `/new_epic.mp3`（位于 SD 卡根目录），规格为 48 kHz、16 位、立体声。
 
 此音乐片段来自 Royalty Free Music By 500Audio，详见：https://500audio.com/track/new-epic_22682
 
