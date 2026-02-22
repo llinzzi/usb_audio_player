@@ -6,7 +6,7 @@
 
 #include <inttypes.h>
 #include <stdio.h>
-#include <sys/stat.h>
+#include <string.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/event_groups.h"
 #include "freertos/task.h"
@@ -14,41 +14,33 @@
 #include "esp_err.h"
 #include "esp_log.h"
 #include "esp_vfs_fat.h"
-#include "driver/gpio.h"
-#include "driver/spi_master.h"
-#include "driver/i2c.h"
+#include "sdmmc_cmd.h"
+#include "driver/i2c_master.h"
+#include "esp_io_expander_tca9554.h"
+#include "driver/sdmmc_host.h"
 #include "usb/usb_host.h"
 #include "usb/uac_host.h"
 #include "audio_player.h"
-#include "sdmmc_cmd.h"
 
 static const char *TAG = "usb_audio_player";
 
-// SD Card pins (Waveshare ESP32-S3)
-#define SD_MOSI_PIN     (1)
-#define SD_SCK_PIN      (2)
-#define SD_MISO_PIN     (3)
-// SD CS is controlled by TCA9554 EXIO7 (P7)
+// I2C configuration for TCA9554
+#define I2C_NUM             I2C_NUM_0
+#define I2C_SCL_PIN         GPIO_NUM_14
+#define I2C_SDA_PIN         GPIO_NUM_15
+#define I2C_FREQ_HZ         400000
 
-// TCA9554PWR I2C configuration (Waveshare ESP32-S3)
-#define I2C_NUM         I2C_NUM_0
-#define I2C_SDA_PIN     (15)
-#define I2C_SCL_PIN     (14)
-#define TCA9554_ADDR    0x20
+// SD card configuration (1-bit SDMMC mode for Waveshare ESP32-S3-Touch-AMOLED-1.8)
+// From official example: CONFIG_EXAMPLE_PIN_CLK=2, CONFIG_EXAMPLE_PIN_CMD=1, CONFIG_EXAMPLE_PIN_D0=3
+#define SD_CLK_PIN          GPIO_NUM_2
+#define SD_CMD_PIN          GPIO_NUM_1
+#define SD_D0_PIN           GPIO_NUM_3
 
-// TCA9554 pin mapping - P7 is EXIO7 for SD CS
-#define TCA9554_SD_CS_BIT   (0x80)  // P7 = bit 7
+// SD card configuration
+#define SD_BASE_PATH        "/sd"
+#define MP3_FILE_NAME       "/new_epic.mp3"
 
-// TCA9554 register addresses
-#define TCA9554_INPUT_PORT      0x00
-#define TCA9554_OUTPUT_PORT     0x01
-#define TCA9554_POLARITY_INV    0x02
-#define TCA9554_CONFIGURATION   0x03
-
-// SD card mount point
-#define MOUNT_POINT             "/sdcard"
-#define MP3_FILE_NAME           "/new_epic.mp3"
-
+// USB Host and UAC task priorities
 #define USB_HOST_TASK_PRIORITY  5
 #define UAC_TASK_PRIORITY       5
 #define USER_TASK_PRIORITY      2
@@ -63,8 +55,8 @@ static uint32_t s_spk_curr_freq = DEFAULT_UAC_FREQ;
 static uint8_t s_spk_curr_bits = DEFAULT_UAC_BITS;
 static uint8_t s_spk_curr_ch = DEFAULT_UAC_CH;
 static FILE *s_fp = NULL;
+static esp_io_expander_handle_t s_io_expander = NULL;
 static void uac_device_callback(uac_host_device_handle_t uac_device_handle, const uac_host_device_event_t event, void *arg);
-
 /**
  * @brief event group
  *
@@ -99,105 +91,6 @@ typedef struct {
         } device_evt;
     };
 } s_event_queue_t;
-
-/**
- * @brief Write a byte to TCA9554 register
- */
-static esp_err_t tca9554_write_reg(uint8_t reg_addr, uint8_t value)
-{
-    uint8_t write_buf[2] = {reg_addr, value};
-    return i2c_master_write_to_device(I2C_NUM, TCA9554_ADDR, write_buf, sizeof(write_buf), 100 / portTICK_PERIOD_MS);
-}
-
-/**
- * @brief Initialize TCA9554PWR IO expander
- */
-static esp_err_t tca9554_init(void)
-{
-    i2c_config_t conf = {
-        .mode = I2C_MODE_MASTER,
-        .sda_io_num = I2C_SDA_PIN,
-        .scl_io_num = I2C_SCL_PIN,
-        .sda_pullup_en = GPIO_PULLUP_ENABLE,
-        .scl_pullup_en = GPIO_PULLUP_ENABLE,
-        .master.clk_speed = 100000,
-    };
-    ESP_ERROR_CHECK(i2c_param_config(I2C_NUM, &conf));
-    ESP_ERROR_CHECK(i2c_driver_install(I2C_NUM, conf.mode, 0, 0, 0));
-
-    // Configure P7 (EXIO7/SDCS) as output, others as input
-    // All outputs low by default
-    ESP_ERROR_CHECK(tca9554_write_reg(TCA9554_OUTPUT_PORT, 0x00));
-    // P7 as output (0), others as input (1) = 10000000 = 0x80
-    ESP_ERROR_CHECK(tca9554_write_reg(TCA9554_CONFIGURATION, 0x80));
-
-    ESP_LOGI(TAG, "TCA9554 initialized");
-    return ESP_OK;
-}
-
-/**
- * @brief Set SD card CS pin state
- * @param select true to select SD card, false to deselect
- */
-static void sd_cs_set(bool select)
-{
-    // P7 low = SD card selected, P7 high = SD card deselected
-    uint8_t value = select ? 0x00 : TCA9554_SD_CS_BIT;
-    tca9554_write_reg(TCA9554_OUTPUT_PORT, value);
-}
-
-/**
- * @brief Initialize SD card
- */
-static esp_err_t sdcard_init(void)
-{
-    ESP_LOGI(TAG, "Initializing SD card...");
-
-    // Initialize TCA9554 first
-    ESP_ERROR_CHECK(tca9554_init());
-
-    // Select SD card (P7 low)
-    sd_cs_set(true);
-    vTaskDelay(10 / portTICK_PERIOD_MS);
-
-    // Configure SPI bus for SD card
-    spi_bus_config_t bus_cfg = {
-        .mosi_io_num = SD_MOSI_PIN,
-        .miso_io_num = SD_MISO_PIN,
-        .sclk_io_num = SD_SCK_PIN,
-        .quadwp_io_num = -1,
-        .quadhd_io_num = -1,
-        .max_transfer_sz = 16384,
-    };
-    ESP_ERROR_CHECK(spi_bus_initialize(SPI2_HOST, &bus_cfg, SPI_DMA_CH_AUTO));
-
-    // Options for mounting the filesystem
-    esp_vfs_fat_sdmmc_mount_config_t mount_config = {
-        .format_if_mount_failed = false,
-        .max_files = 2,
-        .allocation_unit_size = 16 * 1024,
-    };
-
-    // Use SPI SD card mode
-    sdmmc_card_t *card;
-    sdmmc_host_t host = SDSPI_HOST_DEFAULT();
-    host.slot = SPI2_HOST;
-
-    sdspi_device_config_t slot_config = SDSPI_DEVICE_CONFIG_DEFAULT();
-    slot_config.gpio_cs = -1;  // CS controlled by TCA9554 externally
-
-    // Mount filesystem
-    esp_err_t ret = esp_vfs_fat_sdspi_mount(MOUNT_POINT, &host, &slot_config, &mount_config, &card);
-    if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to mount SD card filesystem (%s)", esp_err_to_name(ret));
-        sd_cs_set(false);
-        return ret;
-    }
-
-    sdmmc_card_print_info(stdout, card);
-    ESP_LOGI(TAG, "SD card mounted at %s", MOUNT_POINT);
-    return ESP_OK;
-}
 
 static esp_err_t _audio_player_mute_fn(AUDIO_PLAYER_MUTE_SETTING setting)
 {
@@ -261,7 +154,7 @@ static void _audio_player_callback(audio_player_cb_ctx_t *ctx)
         }
         ESP_ERROR_CHECK(uac_host_device_suspend(s_spk_dev_handle));
         ESP_LOGI(TAG, "Play in loop");
-        s_fp = fopen(MOUNT_POINT MP3_FILE_NAME, "rb");
+        s_fp = fopen(SD_BASE_PATH MP3_FILE_NAME, "rb");
         if (s_fp) {
             ESP_LOGI(TAG, "Playing '%s'", MP3_FILE_NAME);
             audio_player_play(s_fp);
@@ -398,7 +291,7 @@ static void uac_lib_task(void *arg)
                     };
                     ESP_ERROR_CHECK(uac_host_device_start(uac_device_handle, &stm_config));
                     s_spk_dev_handle = uac_device_handle;
-                    s_fp = fopen(MOUNT_POINT MP3_FILE_NAME, "rb");
+                    s_fp = fopen(SD_BASE_PATH MP3_FILE_NAME, "rb");
                     if (s_fp) {
                         ESP_LOGI(TAG, "Playing '%s'", MP3_FILE_NAME);
                         audio_player_play(s_fp);
@@ -443,13 +336,116 @@ static void uac_lib_task(void *arg)
     ESP_ERROR_CHECK(uac_host_uninstall());
 }
 
+/**
+ * @brief Initialize TCA9554 I/O expander and power on SD card
+ */
+static esp_err_t tca9554_init(void)
+{
+    ESP_LOGI(TAG, "Initializing TCA9554 I/O expander");
+
+    i2c_master_bus_handle_t i2c_bus = NULL;
+    i2c_master_bus_config_t bus_config = {
+        .clk_source = I2C_CLK_SRC_DEFAULT,
+        .glitch_ignore_cnt = 7,
+        .i2c_port = I2C_NUM,
+        .sda_io_num = I2C_SDA_PIN,
+        .scl_io_num = I2C_SCL_PIN,
+        .flags.enable_internal_pullup = true,
+    };
+    ESP_ERROR_CHECK(i2c_new_master_bus(&bus_config, &i2c_bus));
+
+    esp_err_t ret = esp_io_expander_new_i2c_tca9554(i2c_bus, ESP_IO_EXPANDER_I2C_TCA9554_ADDRESS_000, &s_io_expander);
+
+    if (ret != ESP_OK || s_io_expander == NULL) {
+        ESP_LOGE(TAG, "Failed to initialize TCA9554");
+        return ESP_ERR_NOT_FOUND;
+    }
+
+    ESP_LOGI(TAG, "TCA9554 initialized");
+
+    // Configure SD card power control pins as output
+    // IO0, IO1, IO2, IO7 are used for SD card power/control
+    ESP_ERROR_CHECK(esp_io_expander_set_dir(s_io_expander,
+                                            IO_EXPANDER_PIN_NUM_0 |
+                                            IO_EXPANDER_PIN_NUM_1 |
+                                            IO_EXPANDER_PIN_NUM_2 |
+                                            IO_EXPANDER_PIN_NUM_7,
+                                            IO_EXPANDER_OUTPUT));
+
+    // Set all pins low first
+    ESP_ERROR_CHECK(esp_io_expander_set_level(s_io_expander, IO_EXPANDER_PIN_NUM_0, 0));
+    ESP_ERROR_CHECK(esp_io_expander_set_level(s_io_expander, IO_EXPANDER_PIN_NUM_1, 0));
+    ESP_ERROR_CHECK(esp_io_expander_set_level(s_io_expander, IO_EXPANDER_PIN_NUM_2, 0));
+    ESP_ERROR_CHECK(esp_io_expander_set_level(s_io_expander, IO_EXPANDER_PIN_NUM_7, 0));
+
+    vTaskDelay(pdMS_TO_TICKS(200));
+
+    // Set pins high to power on SD card
+    ESP_ERROR_CHECK(esp_io_expander_set_level(s_io_expander, IO_EXPANDER_PIN_NUM_0, 1));
+    ESP_ERROR_CHECK(esp_io_expander_set_level(s_io_expander, IO_EXPANDER_PIN_NUM_1, 1));
+    ESP_ERROR_CHECK(esp_io_expander_set_level(s_io_expander, IO_EXPANDER_PIN_NUM_2, 1));
+    ESP_ERROR_CHECK(esp_io_expander_set_level(s_io_expander, IO_EXPANDER_PIN_NUM_7, 1));
+
+    ESP_LOGI(TAG, "SD card powered on");
+
+    return ESP_OK;
+}
+
+/**
+ * @brief Initialize SD card using SDMMC peripheral (1-bit mode)
+ */
+static esp_err_t sd_card_init(void)
+{
+    ESP_LOGI(TAG, "Initializing SD card using SDMMC peripheral (1-bit mode)");
+
+    sdmmc_host_t host = SDMMC_HOST_DEFAULT();
+
+    // This initializes the slot without card detect (CD) and write protect (WP) signals
+    sdmmc_slot_config_t slot_config = SDMMC_SLOT_CONFIG_DEFAULT();
+
+    // Set pin numbers - 1-bit SDMMC mode
+    slot_config.clk = SD_CLK_PIN;
+    slot_config.cmd = SD_CMD_PIN;
+    slot_config.d0 = SD_D0_PIN;
+    slot_config.width = 1;  // Use 1-bit SDMMC mode
+
+    // Enable internal pullups on enabled pins
+    slot_config.flags |= SDMMC_SLOT_FLAG_INTERNAL_PULLUP;
+
+    esp_vfs_fat_sdmmc_mount_config_t mount_config = {
+        .format_if_mount_failed = false,
+        .max_files = 2,
+        .allocation_unit_size = 16 * 1024,
+    };
+
+    sdmmc_card_t *card;
+    esp_err_t ret = esp_vfs_fat_sdmmc_mount(SD_BASE_PATH, &host, &slot_config, &mount_config, &card);
+
+    if (ret != ESP_OK) {
+        if (ret == ESP_FAIL) {
+            ESP_LOGE(TAG, "Failed to mount filesystem. Check if SD card is formatted.");
+        } else {
+            ESP_LOGE(TAG, "Failed to initialize SD card (0x%x)", ret);
+        }
+        return ret;
+    }
+
+    ESP_LOGI(TAG, "SD card mounted at %s", SD_BASE_PATH);
+    ESP_LOGI(TAG, "SD card capacity: %llu MB", (uint64_t)card->csd.capacity / (1024 * 1024));
+
+    return ESP_OK;
+}
+
 void app_main(void)
 {
     s_event_queue = xQueueCreate(10, sizeof(s_event_queue_t));
     assert(s_event_queue != NULL);
 
+    // Initialize TCA9554 I/O expander
+    ESP_ERROR_CHECK(tca9554_init());
+
     // Initialize SD card
-    ESP_ERROR_CHECK(sdcard_init());
+    ESP_ERROR_CHECK(sd_card_init());
 
     audio_player_config_t config = {.mute_fn = _audio_player_mute_fn,
                                     .write_fn = _audio_player_write_fn,
