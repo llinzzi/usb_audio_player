@@ -12,7 +12,10 @@
 #include "freertos/queue.h"
 #include "esp_err.h"
 #include "esp_log.h"
-#include "esp_spiffs.h"
+#include "esp_vfs_fat.h"
+#include "sdmmc_cmd.h"
+#include "driver/gpio.h"
+#include "driver/spi_master.h"
 #include "usb/usb_host.h"
 #include "usb/uac_host.h"
 #include "audio_player.h"
@@ -22,13 +25,19 @@ static const char *TAG = "usb_audio_player";
 #define USB_HOST_TASK_PRIORITY  5
 #define UAC_TASK_PRIORITY       5
 #define USER_TASK_PRIORITY      2
-#define SPIFFS_BASE             "/spiffs"
+#define MOUNT_POINT             "/sdcard"
 #define MP3_FILE_NAME           "/new_epic.mp3"
 #define BIT1_SPK_START          (0x01 << 0)
 #define DEFAULT_VOLUME          50
 #define DEFAULT_UAC_FREQ        48000
 #define DEFAULT_UAC_BITS        16
 #define DEFAULT_UAC_CH          2
+
+// SD 卡引脚配置 (微雪 ESP32-S3)
+#define SD_CARD_CS_PIN          10
+#define SD_CARD_MOSI_PIN        11
+#define SD_CARD_MISO_PIN        12
+#define SD_CARD_SCK_PIN         13
 
 static QueueHandle_t s_event_queue = NULL;
 static uac_host_device_handle_t s_spk_dev_handle = NULL;
@@ -134,7 +143,7 @@ static void _audio_player_callback(audio_player_cb_ctx_t *ctx)
         }
         ESP_ERROR_CHECK(uac_host_device_suspend(s_spk_dev_handle));
         ESP_LOGI(TAG, "Play in loop");
-        s_fp = fopen(SPIFFS_BASE MP3_FILE_NAME, "rb");
+        s_fp = fopen(MOUNT_POINT MP3_FILE_NAME, "rb");
         if (s_fp) {
             ESP_LOGI(TAG, "Playing '%s'", MP3_FILE_NAME);
             audio_player_play(s_fp);
@@ -271,7 +280,7 @@ static void uac_lib_task(void *arg)
                     };
                     ESP_ERROR_CHECK(uac_host_device_start(uac_device_handle, &stm_config));
                     s_spk_dev_handle = uac_device_handle;
-                    s_fp = fopen(SPIFFS_BASE MP3_FILE_NAME, "rb");
+                    s_fp = fopen(MOUNT_POINT MP3_FILE_NAME, "rb");
                     if (s_fp) {
                         ESP_LOGI(TAG, "Playing '%s'", MP3_FILE_NAME);
                         audio_player_play(s_fp);
@@ -321,13 +330,45 @@ void app_main(void)
     s_event_queue = xQueueCreate(10, sizeof(s_event_queue_t));
     assert(s_event_queue != NULL);
 
-    esp_vfs_spiffs_conf_t conf = {
-        .base_path = SPIFFS_BASE,
-        .partition_label = NULL,
-        .max_files = 2,
-        .format_if_mount_failed = true,
+    // Initialize SD card (SPI mode)
+    ESP_LOGI(TAG, "Initializing SD card (SPI mode)");
+
+    // Initialize SPI bus
+    spi_bus_config_t bus_cfg = {
+        .mosi_io_num = SD_CARD_MOSI_PIN,
+        .miso_io_num = SD_CARD_MISO_PIN,
+        .sclk_io_num = SD_CARD_SCK_PIN,
+        .quadwp_io_num = -1,
+        .quadhd_io_num = -1,
+        .max_transfer_sz = 4000,
     };
-    ESP_ERROR_CHECK(esp_vfs_spiffs_register(&conf));
+    ESP_ERROR_CHECK(spi_bus_initialize(SPI2_HOST, &bus_cfg, SPI_DMA_CH_AUTO));
+
+    sdspi_device_config_t dev_config = SDSPI_DEVICE_CONFIG_DEFAULT();
+    dev_config.gpio_cs = SD_CARD_CS_PIN;
+    dev_config.host_id = SPI2_HOST;
+
+    esp_vfs_fat_sdmmc_mount_config_t mount_config = {
+        .format_if_mount_failed = false,
+        .max_files = 2,
+        .allocation_unit_size = 16 * 1024
+    };
+
+    sdmmc_card_t *card;
+    sdmmc_host_t host = SDSPI_HOST_DEFAULT();
+    host.slot = SPI2_HOST;
+    esp_err_t ret = esp_vfs_fat_sdspi_mount(MOUNT_POINT, &host, &dev_config, &mount_config, &card);
+    if (ret != ESP_OK) {
+        if (ret == ESP_FAIL) {
+            ESP_LOGE(TAG, "Failed to mount filesystem. SD card not found or not initialized.");
+        } else {
+            ESP_LOGE(TAG, "Failed to mount filesystem (%s)", esp_err_to_name(ret));
+        }
+    } else {
+        ESP_LOGI(TAG, "SD card mounted successfully");
+        ESP_LOGI(TAG, "SD card capacity: %llu MB", (unsigned long long)card->csd.capacity * card->csd.sector_size / 1024 / 1024);
+    }
+
     audio_player_config_t config = {.mute_fn = _audio_player_mute_fn,
                                     .write_fn = _audio_player_write_fn,
                                     .clk_set_fn = _audio_player_std_clock,
@@ -337,12 +378,12 @@ void app_main(void)
     ESP_ERROR_CHECK(audio_player_callback_register(_audio_player_callback, NULL));
 
     static TaskHandle_t uac_task_handle = NULL;
-    BaseType_t ret = xTaskCreatePinnedToCore(uac_lib_task, "uac_events", 4096, NULL,
+    BaseType_t xret = xTaskCreatePinnedToCore(uac_lib_task, "uac_events", 4096, NULL,
                                              USER_TASK_PRIORITY, &uac_task_handle, 0);
-    assert(ret == pdTRUE);
-    ret = xTaskCreatePinnedToCore(usb_lib_task, "usb_events", 4096, (void *)uac_task_handle,
+    assert(xret == pdTRUE);
+    xret = xTaskCreatePinnedToCore(usb_lib_task, "usb_events", 4096, (void *)uac_task_handle,
                                   USB_HOST_TASK_PRIORITY, NULL, 0);
-    assert(ret == pdTRUE);
+    assert(xret == pdTRUE);
 
     while (1) {
         vTaskDelay(100);
